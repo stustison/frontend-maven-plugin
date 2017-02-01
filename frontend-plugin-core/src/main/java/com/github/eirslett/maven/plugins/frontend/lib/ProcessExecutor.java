@@ -100,7 +100,7 @@ final class ProcessExecutor {
     }
 
     private void acquireLock(final Logger logger) {
-        long timeout = System.currentTimeMillis() + 60000;
+        long timeout = System.currentTimeMillis() + 600000;
         if (!lockFile.exists()) {
             try {
                 lockFile.createNewFile();

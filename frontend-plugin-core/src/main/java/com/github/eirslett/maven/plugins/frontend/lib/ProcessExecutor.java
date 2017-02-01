@@ -2,8 +2,13 @@ package com.github.eirslett.maven.plugins.frontend.lib;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.io.RandomAccessFile;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.channels.OverlappingFileLockException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -31,6 +36,9 @@ final class ProcessExecutionException extends Exception {
 }
 
 final class ProcessExecutor {
+    private File lockFile = new File(System.getProperty("java.io.tmpdir") + File.separator + ProcessExecutor.class.getCanonicalName() + ".lock");
+    private RandomAccessFile randomAccessFile;
+    private FileLock fileLock = null;
     private final Map<String, String> environment;
     private CommandLine commandLine;
     private final Executor executor;
@@ -68,20 +76,80 @@ final class ProcessExecutor {
             throws ProcessExecutionException {
         logger.debug("Executing command line {}", commandLine);
         try {
-            ExecuteStreamHandler streamHandler = new PumpStreamHandler(stdout, stderr);
-            executor.setStreamHandler(streamHandler);
+            acquireLock(logger);
+            try {
+                ExecuteStreamHandler streamHandler = new PumpStreamHandler(stdout, stderr);
+                executor.setStreamHandler(streamHandler);
 
-            int exitValue = executor.execute(commandLine, environment);
-            logger.debug("Exit value {}", exitValue);
+                int exitValue = executor.execute(commandLine, environment);
+                logger.debug("Exit value {}", exitValue);
 
-            return exitValue;
-        } catch (ExecuteException e) {
-            if (executor.getWatchdog() != null && executor.getWatchdog().killedProcess()) {
-                throw new ProcessExecutionException("Process killed after timeout");
+                return exitValue;
+            } catch (ExecuteException e) {
+                if (executor.getWatchdog() != null && executor.getWatchdog()
+                        .killedProcess()) {
+                    throw new ProcessExecutionException("Process killed after timeout");
+                }
+                throw new ProcessExecutionException(e);
+            } catch (IOException e) {
+                throw new ProcessExecutionException(e);
             }
-            throw new ProcessExecutionException(e);
-        } catch (IOException e) {
-            throw new ProcessExecutionException(e);
+        } finally {
+            releaseLock(logger);
+        }
+    }
+
+    private void acquireLock(final Logger logger) {
+        long timeout = System.currentTimeMillis() + 60000;
+        if (!lockFile.exists()) {
+            try {
+                lockFile.createNewFile();
+            } catch (IOException e) {
+                logger.warn("Unable to create lock file.", e);
+            }
+        }
+        try {
+            randomAccessFile = new RandomAccessFile(lockFile, "rw");
+        } catch (FileNotFoundException e) {
+            logger.warn("Unable to create random access file for lock.", e);
+        }
+        if (randomAccessFile != null) {
+            FileChannel fileChannel = randomAccessFile.getChannel();
+            while (System.currentTimeMillis() < timeout) {
+                try {
+                    fileLock = fileChannel.tryLock();
+                } catch (IOException e) {
+                    logger.warn("Exception while attempting lock.", e);
+                } catch (OverlappingFileLockException e) {
+                    //ignore
+                }
+                if (fileLock != null) {
+                    break;
+                }
+                try {
+                    Thread.sleep(250);
+                } catch (InterruptedException e) {
+                    logger.warn("Interrupted while acquiring lock.", e);
+                }
+            }
+        }
+    }
+
+    private void releaseLock(final Logger logger) {
+        if (fileLock != null) {
+            try {
+                fileLock.release();
+                fileLock = null;
+            } catch (IOException e) {
+                logger.warn("Exception while releasing lock.", e);
+            }
+        }
+        if (randomAccessFile != null) {
+            try {
+                randomAccessFile.close();
+            } catch (IOException e) {
+                logger.warn("Exception while closing random access file.", e);
+            }
         }
     }
 
